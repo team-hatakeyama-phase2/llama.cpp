@@ -8725,6 +8725,24 @@ static struct ggml_tensor * llm_build_ffn(
     return cur;
 }
 
+ggml_tensor * compute_std(struct ggml_context * ctx, ggml_tensor * x) {
+    // 1. 平均を計算
+    ggml_tensor * mean = ggml_mean(ctx, x);
+    ggml_tensor * broadcasted_mean = ggml_repeat(ctx, mean, x);
+
+    // 2. (x - mean)^2 を計算
+    ggml_tensor * diff = ggml_sub(ctx, x, broadcasted_mean);
+    ggml_tensor * diff_squared = ggml_sqr(ctx, diff);
+
+    // 3. 平均を計算 (mean((x - mean)^2))
+    ggml_tensor * variance = ggml_mean(ctx, diff_squared);
+
+    // 4. 平方根を計算
+    ggml_tensor * std = ggml_sqrt(ctx, variance);
+
+    return std;
+    }
+
 static struct ggml_tensor * llm_build_moe_ffn(
         struct ggml_context * ctx,
        struct llama_context & lctx,
@@ -8747,7 +8765,18 @@ static struct ggml_tensor * llm_build_moe_ffn(
     ggml_tensor * logits = llm_build_lora_mm(lctx, ctx, gate_inp, cur); // [n_expert, n_tokens]
     cb(logits, "ffn_moe_logits", il);
 
-    ggml_tensor * probs = ggml_soft_max(ctx, logits); // [n_expert, n_tokens]
+    // 正規化処理を追加
+    ggml_tensor * mean = ggml_mean(ctx, logits);
+    ggml_tensor * broadcasted_mean = ggml_repeat(ctx, mean, logits);
+    ggml_tensor * std = compute_std(ctx, logits);
+    ggml_tensor * epsilon = ggml_new_f32(ctx, 1e-5);
+    ggml_tensor * normalized_logits = ggml_div(ctx,
+        ggml_sub(ctx, logits, broadcasted_mean),
+        ggml_add(ctx, std, epsilon)
+    );
+    cb(normalized_logits, "ffn_moe_normalized_logits", il);
+
+    ggml_tensor * probs = ggml_soft_max(ctx, normalized_logits); // [n_expert, n_tokens]
     cb(probs, "ffn_moe_probs", il);
 
     // select experts
